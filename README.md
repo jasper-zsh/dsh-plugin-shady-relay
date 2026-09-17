@@ -85,7 +85,7 @@ Harness 内容
 - 固定 System Prompt 不能只包含空白。
 - 改写 provider 路由时不能占用其他适配器或 configurable-provider directory 已拥有的路由。
 - 目标 provider 在实际请求发生时必须已注册。
-- 真实模型的上下文窗口、输入模态和推理等级由虚拟模型解析时继承。
+- 真实模型的上下文窗口、输入模态和推理等级由虚拟模型解析时继承；模型目录也会解析目标路由并显式镜像其输入模态，因此图像能力不会在虚拟 Provider 层丢失。
 - 转发会再次进入 Harness `llm/stream` seam，因此观察器可能同时看到外层虚拟路由和内层真实路由。
 
 ## 安装与 HMR

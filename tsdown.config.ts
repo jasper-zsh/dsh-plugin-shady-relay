@@ -12,7 +12,8 @@ export default defineConfig([
     target: 'es2024',
     fixedExtension: false,
     dts: false,
-    clean: true,
+    // HMR watches in-place `change` events; never unlink the live Host bundle.
+    clean: false,
     deps: {
       neverBundle: [
         '@deepseek-ai/cordis',

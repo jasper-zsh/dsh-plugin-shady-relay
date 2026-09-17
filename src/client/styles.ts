@@ -55,7 +55,15 @@ export const CSS = `
   cursor: pointer;
 }
 .shadyRelayButton:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary, #6d8cff); }
-.shadyRelayButtonPrimary { background: var(--dsw-alias-brand-primary, #526de0); color: #fff; border-color: transparent; }
+.shadyRelayButtonPrimary {
+  background: var(--dsw-alias-button-primary-fill, #526de0);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+  border-color: transparent;
+}
+.shadyRelayButtonPrimary:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--dsw-alias-button-primary-hover, #6d8cff);
+}
 .shadyRelayButtonDanger { color: var(--dsw-alias-state-error-primary, #ff6666); }
 .shadyRelayButton:disabled { cursor: not-allowed; opacity: .5; }
 .shadyRelayStatus { border-radius: 8px; padding: 9px 11px; font-size: 13px; line-height: 20px; }

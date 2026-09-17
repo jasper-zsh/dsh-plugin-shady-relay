@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionHandle, ModelProviderGroup } from '@deepseek-ai/dsh-client-connection/client'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import React from 'react'
@@ -12,9 +12,34 @@ import {
 } from '../shared'
 import { CSS } from './styles'
 
-export const inject = ['slots', 'settingsScope', 'connection', 'remote']
+// `remote` is a namespaced service: touching `ctx.remote.session` additionally
+// requires the `remote.session` sub-dependency here, or the property access
+// throws at apply time ("cannot get property \"remote.session\" without inject").
+export const inject = ['slots', 'settingsScope', 'remote', 'remote.session']
 
 type RelayScope = SettingsScope<Config>
+
+/**
+ * Model-catalog slice of the `remote` service (`ctx.remote.session.modelCatalog`).
+ * The generated ClientRemote type drags the whole Remote peer graph into this
+ * package for one method, so this pins only the structural contract actually
+ * consumed here; verified against the runtime contract shipped with DSH
+ * Desktop 2.0.10 (@deepseek-ai/dsh-api-session-controller 0.1.5-rc.2).
+ */
+interface RemoteCatalogFace {
+  session: {
+    modelCatalog(): Promise<
+      | { readonly ok: true; readonly value: { readonly groups: readonly RemoteProviderGroup[] } }
+      | { readonly ok: false; readonly error: { readonly code: string; readonly message: string } }
+    >
+  }
+}
+
+interface RemoteProviderGroup {
+  readonly id: string
+  readonly name: string
+  readonly models: ReadonlyArray<{ readonly id: string; readonly name: string }>
+}
 
 interface DraftModel {
   id: string
@@ -82,7 +107,7 @@ function sameModels(
   return JSON.stringify(toModels(toDrafts(left))) === JSON.stringify(right)
 }
 
-function RelaySettingsPage({ scope, connection }: { scope: RelayScope; connection: ConnectionHandle }) {
+function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: RemoteCatalogFace }) {
   const snapshot = React.useSyncExternalStore(
     (listener) => scope.subscribe(listener),
     () => scope.getSnapshot(),
@@ -93,7 +118,7 @@ function RelaySettingsPage({ scope, connection }: { scope: RelayScope; connectio
   const [dirty, setDirty] = React.useState(false)
   const [saving, setSaving] = React.useState(false)
   const [message, setMessage] = React.useState<{ kind: 'error' | 'success'; text: string } | null>(null)
-  const [catalog, setCatalog] = React.useState<ModelProviderGroup[]>([])
+  const [catalog, setCatalog] = React.useState<RemoteProviderGroup[]>([])
   const [catalogError, setCatalogError] = React.useState<string | null>(null)
   const listId = React.useId().replace(/:/g, '')
 
@@ -103,19 +128,19 @@ function RelaySettingsPage({ scope, connection }: { scope: RelayScope; connectio
 
   React.useEffect(() => {
     let active = true
-    connection.api.llm.models({}).then((response) => {
+    remote.session.modelCatalog().then((response) => {
       if (!active) return
-      if (!response.result.ok) {
-        setCatalogError(response.result.error.message)
+      if (!response.ok) {
+        setCatalogError(`${response.error.code}: ${response.error.message}`)
         return
       }
-      setCatalog(response.result.value.groups.filter((group) => group.id !== provider))
+      setCatalog(response.value.groups.filter((group) => group.id !== provider))
       setCatalogError(null)
     }).catch((error) => {
       if (active) setCatalogError(error instanceof Error ? error.message : String(error))
     })
     return () => { active = false }
-  }, [connection, provider, snapshot.revision])
+  }, [remote, provider, snapshot.revision])
 
   const edit = (index: number, field: keyof DraftModel, value: string) => {
     setDrafts((current) => current.map((draft, at) => at === index ? { ...draft, [field]: value } : draft))
@@ -257,7 +282,7 @@ function RelaySettingsPage({ scope, connection }: { scope: RelayScope; connectio
 
 export function apply(ctx: Context): void {
   const scope = ctx.settingsScope.bind<Config>({ namespace: SETTINGS_NAMESPACE })
-  const connection = ctx.get('connection') as ConnectionHandle
+  const remote = ctx.remote as unknown as RemoteCatalogFace
 
   ctx.effect(() => {
     const style = document.createElement('style')
@@ -269,6 +294,6 @@ export function apply(ctx: Context): void {
 
   ctx.slots.inject('settings.section', () => ctx.slots.register(
     { name: 'settings.section', id: 'shady-relay', order: 11, label: '虚拟模型' },
-    () => <RelaySettingsPage scope={scope} connection={connection} />,
+    () => <RelaySettingsPage scope={scope} remote={remote} />,
   ))
 }

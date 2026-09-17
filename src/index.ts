@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-settings'
 import {
   LlmAdapter,
   LlmError,
@@ -8,9 +9,9 @@ import {
   type LlmResolvedModelInfo,
   type LlmProviderInfo,
   type LlmRuntime,
+  type PreparedAdapterCall,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { deepEqualJson, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_DISPLAY_NAME,
@@ -27,7 +28,10 @@ export type { VirtualModelConfig } from './shared'
 export const name = 'shady-relay'
 export const inject = ['llm', 'settings']
 
-const NS = settingsNamespace(SETTINGS_NAMESPACE)
+/** Compare two JSON-shaped configs by their serialized form (config fields are plain JSON). */
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
 
 const virtualModelSchema = z.object({
   id: z.string().min(1).required().description('Virtual model id shown by DSH.'),
@@ -137,11 +141,20 @@ export class ShadyRelayAdapter extends LlmAdapter {
 
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const config = this.configFor(provider)
-    return config.models.map((model) => ({
-      provider: config.provider,
-      id: model.id,
-      name: model.name ?? model.id,
-      ...(model.description === undefined ? {} : { description: model.description }),
+    return Promise.all(config.models.map(async (model) => {
+      const target = await this.runtime.resolveModelInfo(
+        model.targetProvider,
+        model.targetModel,
+      )
+      return {
+        provider: config.provider,
+        id: model.id,
+        name: model.name ?? model.id,
+        ...(model.description === undefined ? {} : { description: model.description }),
+        ...(target.inputModalities === undefined
+          ? {}
+          : { inputModalities: [...target.inputModalities] }),
+      }
     }))
   }
 
@@ -153,6 +166,35 @@ export class ShadyRelayAdapter extends LlmAdapter {
     const config = this.configFor(provider)
     const route = this.model(config, model)
     const target = await this.runtime.resolveModelInfo(route.targetProvider, route.targetModel, signal)
+    return this.aliasModelInfo(config, route, target)
+  }
+
+  async prepareCall(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<PreparedAdapterCall> {
+    const config = this.configFor(provider)
+    const route = this.model(config, model)
+    const target = await this.runtime.resolveModelInfo(route.targetProvider, route.targetModel, signal)
+    return {
+      model: this.aliasModelInfo(config, route, target),
+      // Capture the exact immutable alias route used for capability resolution so
+      // a later live-settings edit cannot redirect the prepared call elsewhere.
+      stream: (options) => this.streamRoute(route, options),
+    }
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const config = this.configFor(options.provider)
+    return this.streamRoute(this.model(config, options.model), options)
+  }
+
+  private aliasModelInfo(
+    config: ResolvedConfig,
+    route: ResolvedVirtualModel,
+    target: LlmResolvedModelInfo,
+  ): LlmResolvedModelInfo {
     return {
       ...target,
       provider: config.provider,
@@ -162,9 +204,10 @@ export class ShadyRelayAdapter extends LlmAdapter {
     }
   }
 
-  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const config = this.configFor(options.provider)
-    const route = this.model(config, options.model)
+  private streamRoute(
+    route: ResolvedVirtualModel,
+    options: GenerateOptions,
+  ): AsyncIterable<StreamChunk> {
     return this.runtime.stream({
       ...options,
       provider: route.targetProvider,
@@ -227,7 +270,7 @@ export function apply(ctx: Context, config: RelayConfig): void {
   let active: ResolvedConfig | undefined
   let pending: ResolvedConfig | undefined
 
-  const settings = ctx.settings.register(NS, Config, {
+  const settings = ctx.settings.register(SETTINGS_NAMESPACE, Config, {
     base: config,
     applies: 'live',
     validate(value) {
@@ -243,7 +286,7 @@ export function apply(ctx: Context, config: RelayConfig): void {
 
   const activate = (nextRaw: RelayConfig) => {
     const next = resolveConfig(nextRaw)
-    if (deepEqualJson(active, next)) return
+    if (jsonEqual(active, next)) return
     assertTopologyAvailable(ctx, next, active!)
 
     const previous = active!

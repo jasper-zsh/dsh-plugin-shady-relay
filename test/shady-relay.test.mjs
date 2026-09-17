@@ -79,6 +79,7 @@ test('mirrors target capabilities and forwards a copied request', async () => {
     id: 'reviewer',
     name: 'Strict reviewer',
     description: 'Reviews before answering',
+    inputModalities: ['text', 'image'],
   }])
 
   const info = await adapter.resolveModel('relay', 'reviewer')
@@ -109,6 +110,66 @@ test('mirrors target capabilities and forwards a copied request', async () => {
   assert.equal(calls[0].system, 'Always review the answer first.\n\nHarness prompt')
   assert.equal(calls[0].temperature, 0.2)
   assert.equal(original.system, 'Harness prompt')
+})
+
+test('prepareCall captures one alias generation across live settings changes', async () => {
+  let active = resolveConfig({
+    provider: 'relay',
+    models: [{
+      id: 'reviewer',
+      targetProvider: 'openai',
+      targetModel: 'model-a',
+      systemPrompt: 'First prefix',
+    }],
+  })
+  const calls = []
+  const runtime = {
+    async resolveModelInfo(provider, model) {
+      return {
+        provider,
+        id: model,
+        name: model,
+        inputModalities: ['text', 'image'],
+      }
+    },
+    stream(options) {
+      calls.push(options)
+      return (async function* () {
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+  }
+  const adapter = new ShadyRelayAdapter(runtime, () => active)
+  const prepared = await adapter.prepareCall('relay', 'reviewer')
+
+  assert.equal(typeof adapter.prepareCall, 'function')
+  assert.equal(prepared.model.provider, 'relay')
+  assert.equal(prepared.model.id, 'reviewer')
+  assert.deepEqual(prepared.model.inputModalities, ['text', 'image'])
+
+  active = resolveConfig({
+    provider: 'relay',
+    models: [{
+      id: 'reviewer',
+      targetProvider: 'deepseek-official',
+      targetModel: 'model-b',
+      systemPrompt: 'Second prefix',
+    }],
+  })
+
+  for await (const _chunk of prepared.stream({
+    provider: 'relay',
+    model: 'reviewer',
+    messages: [],
+    system: 'Harness prompt',
+  })) {
+    // consume
+  }
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].provider, 'openai')
+  assert.equal(calls[0].model, 'model-a')
+  assert.equal(calls[0].system, 'First prefix\n\nHarness prompt')
 })
 
 test('reads live settings for later catalog and request calls', async () => {
