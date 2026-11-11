@@ -1,5 +1,6 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import {
   LlmAdapter,
   LlmError,
@@ -42,11 +43,31 @@ const virtualModelSchema = z.object({
   systemPrompt: z.string().min(1).required().role('textarea').description('Fixed text prepended to every system prompt.'),
 })
 
-export const Config: z<RelayConfig> = z.object({
+export const Config = z.transform(z.object({
   provider: z.string().min(1).default(DEFAULT_PROVIDER).description('Provider route for the virtual models.'),
   displayName: z.string().min(1).default(DEFAULT_DISPLAY_NAME).description('Provider label shown in model selectors.'),
   models: z.array(virtualModelSchema).default([]).description('Virtual model aliases and their real targets.'),
-})
+}).required(), (value): RelayConfig => {
+  // This callback is serialized to the Client; keep it closure-free.
+  const provider = value.provider ?? 'shady-relay'
+  const displayName = value.displayName ?? 'Shady Relay'
+  if (!provider.trim() || !displayName.trim()) throw new Error('shady-relay: empty provider or display name')
+  const ids = new Set<string>()
+  const models = (value.models ?? []).map((model) => {
+    const { id, targetProvider, targetModel, systemPrompt } = model
+    if (typeof id !== 'string' || typeof targetProvider !== 'string' || typeof targetModel !== 'string'
+      || typeof systemPrompt !== 'string' || !id.trim() || !targetProvider.trim() || !targetModel.trim() || !systemPrompt.trim()) {
+      throw new Error('shady-relay: model fields must contain non-whitespace text')
+    }
+    if (ids.has(id.trim())) throw new Error('shady-relay: duplicate virtual model id')
+    ids.add(id.trim())
+    if (targetProvider.trim() === provider.trim()) throw new Error('shady-relay: target would recurse forever')
+    return { id, targetProvider, targetModel, systemPrompt,
+      ...(model.name == null ? {} : { name: model.name }),
+      ...(model.description == null ? {} : { description: model.description }) }
+  })
+  return { provider, displayName, models }
+}, true).required().volatile()
 
 export interface ResolvedVirtualModel {
   readonly id: string
@@ -266,20 +287,25 @@ function assertTopologyAvailable(ctx: Context, candidate: ResolvedConfig, active
 }
 
 /** Register the live settings namespace, virtual route, and GUI exposure directory. */
-export function apply(ctx: Context, config: RelayConfig): void {
+export function apply(ctx: Context, config: Volatile<RelayConfig>): void {
   let active: ResolvedConfig | undefined
   let pending: ResolvedConfig | undefined
 
-  const settings = ctx.settings.register(SETTINGS_NAMESPACE, Config, {
-    base: config,
-    applies: 'live',
-    validate(value) {
-      const candidate = resolveConfig(value)
-      if (active !== undefined) assertTopologyAvailable(ctx, candidate, active)
-    },
+  ctx.effect(() => ctx.settings.configure({ auto: false }))
+  const readConfig = (): RelayConfig => {
+    const value = config.get()
+    return { ...value, models: value.models?.map((model) => ({ ...model })) }
+  }
+  active = resolveConfig(readConfig())
+  // Match the rc2 adapter contract: validate before Loader commits volatile refs.
+  ctx.on('internal/config', function (_raw, next) {
+    const raw: unknown = next()
+    if (this !== ctx.fiber) return raw
+    const value = Config(raw as Parameters<typeof Config>[0]).get()
+    const candidate = resolveConfig({ ...value, models: value.models?.map((model) => ({ ...model })) })
+    assertTopologyAvailable(ctx, candidate, active!)
+    return raw
   })
-
-  active = resolveConfig(settings.get())
   const adapter = new ShadyRelayAdapter(ctx.llm, () => pending ?? active!)
   const registration = ctx.llm.registerAdapter([active.provider], adapter)
   const directory = ctx.llm.registerConfigurableProviders([directoryEntry(active)])
@@ -311,12 +337,12 @@ export function apply(ctx: Context, config: RelayConfig): void {
     }
   }
 
-  ctx.effect(() => settings.watch((next) => {
+  ctx.on('loader/volatile-update', () => {
     try {
-      activate(next)
+      activate(readConfig())
     } catch (error) {
       ctx.logger.error('shady-relay: keeping the last working virtual-model configuration')
       ctx.logger.error(error)
     }
-  }))
+  })
 }

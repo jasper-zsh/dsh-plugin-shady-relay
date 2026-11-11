@@ -1,5 +1,7 @@
 # dsh-plugin-shady-relay
 
+> CLI 兼容目标：DSH `0.2.1-rc.2`；安装后执行 `pnpm typecheck && pnpm build && pnpm test`。本次未修改 Desktop 应用或任何 profile，运行中 UI/HMR 需在目标 CLI profile 另行验收。
+
 DeepSeek Harness 静态插件：通过 GUI 创建虚拟模型。每个虚拟模型映射到 Harness 中已经注册的真实 `provider/model`，并在每次请求的 system prompt 最前加入用户配置的固定内容。
 
 ## GUI 配置
@@ -13,7 +15,7 @@ DeepSeek Harness 静态插件：通过 GUI 创建虚拟模型。每个虚拟模�
 页面支持：
 
 - 添加、修改和删除虚拟模型映射；
-- 从当前 Harness 模型目录选择目标 Provider 和目标模型，也允许手工输入未列出的动态模型 ID；
+- 目标 Provider 与目标模型只能从当前 Harness 模型目录的下拉列表中选择，不支持手工输入；目标模型下拉内置关键字筛选（针对 OpenRouter 等大目录，按模型 ID 或名称做子串匹配），已保存但不在当前目录中的值会以「不在目录中」选项显示并保留；
 - 配置虚拟模型 ID、显示名称、描述和固定 System Prompt；
 - 保存后立即更新模型目录和后续请求，无需重启；
 - 放弃未保存修改，或恢复 profile 中声明的基础配置。

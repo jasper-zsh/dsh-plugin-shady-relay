@@ -1,23 +1,19 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import React from 'react'
-import {
-  DEFAULT_PROVIDER,
-  SETTINGS_NAMESPACE,
-  type Config,
-  type VirtualModelConfig,
-} from '../shared'
+import { DEFAULT_PROVIDER, type VirtualModelConfig } from '../shared'
 import { CSS } from './styles'
+import { createRelayForm, type RelayForm } from './config-form'
 
 // `remote` is a namespaced service: touching `ctx.remote.session` additionally
 // requires the `remote.session` sub-dependency here, or the property access
 // throws at apply time ("cannot get property \"remote.session\" without inject").
-export const inject = ['slots', 'settingsScope', 'remote', 'remote.session']
+export const inject = ['slots', 'configForms', 'remote', 'remote.session']
 
-type RelayScope = SettingsScope<Config>
+type RelayScope = RelayForm
 
 /**
  * Model-catalog slice of the `remote` service (`ctx.remote.session.modelCatalog`).
@@ -107,6 +103,157 @@ function sameModels(
   return JSON.stringify(toModels(toDrafts(left))) === JSON.stringify(right)
 }
 
+interface ModelOption {
+  readonly id: string
+  readonly name: string
+}
+
+function optionLabel(option: ModelOption): string {
+  return option.name === option.id ? option.id : `${option.name}（${option.id}）`
+}
+
+interface ComboItem {
+  readonly id: string
+  readonly label: string
+  readonly missing: boolean
+}
+
+/**
+ * Dropdown-only model picker with substring filtering for large catalogs such
+ * as OpenRouter. The query is pure UI search state: the committed value is
+ * always one of the catalog options, or the preserved out-of-catalog value —
+ * never free-form input.
+ */
+function FilterableModelSelect({ value, options, disabled, placeholder, onSelect }: {
+  value: string
+  options: ReadonlyArray<ModelOption>
+  disabled: boolean
+  placeholder: string
+  onSelect: (id: string) => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [query, setQuery] = React.useState('')
+  const [highlight, setHighlight] = React.useState(0)
+  const rootRef = React.useRef<HTMLDivElement | null>(null)
+  const searchRef = React.useRef<HTMLInputElement | null>(null)
+  const highlightedRef = React.useRef<HTMLDivElement | null>(null)
+
+  const current = options.find((option) => option.id === value)
+  const known = current !== undefined
+  const orphan = value !== '' && !known
+  const needle = query.trim().toLowerCase()
+  const matches = needle
+    ? options.filter((option) =>
+        option.id.toLowerCase().includes(needle) || option.name.toLowerCase().includes(needle))
+    : options
+  const orphanVisible = orphan && (!needle || value.toLowerCase().includes(needle))
+  const items: ComboItem[] = [
+    ...(orphanVisible ? [{ id: value, label: `${value}（不在目录中）`, missing: true }] : []),
+    ...matches.map((option) => ({ id: option.id, label: optionLabel(option), missing: false })),
+  ]
+
+  // Close on outside pointer-down; capture phase so the click that re-toggles
+  // the button is distinguished from unrelated page clicks.
+  React.useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [open])
+
+  React.useEffect(() => {
+    if (open) {
+      setQuery('')
+      setHighlight(Math.max(items.findIndex((item) => item.id === value), 0))
+      searchRef.current?.focus()
+    }
+    // Re-run only on open toggle: the initial highlight is a snapshot of where
+    // the current value sits when the popup opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  React.useEffect(() => {
+    if (open) highlightedRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [highlight, open])
+
+  const pick = (id: string) => {
+    onSelect(id)
+    setOpen(false)
+  }
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setOpen(false)
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setHighlight((at) => Math.min(at + 1, Math.max(items.length - 1, 0)))
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setHighlight((at) => Math.max(at - 1, 0))
+    } else if (event.key === 'Enter') {
+      const item = items[highlight]
+      if (item === undefined) return
+      event.preventDefault()
+      pick(item.id)
+    }
+  }
+
+  return <div className="shadyRelayCombo" ref={rootRef}>
+    <button
+      type="button"
+      className="shadyRelayInput shadyRelayComboButton"
+      disabled={disabled}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      onClick={() => setOpen((wasOpen) => !wasOpen)}
+    >
+      <span className={`shadyRelayComboValue${value ? '' : ' shadyRelayComboPlaceholder'}`}>
+        {value ? (current ? optionLabel(current) : `${value}（不在目录中）`) : placeholder}
+      </span>
+      <span className="shadyRelayComboArrow" aria-hidden="true" />
+    </button>
+    {open && <div className="shadyRelayComboPopup">
+      <input
+        ref={searchRef}
+        className="shadyRelayComboSearch"
+        value={query}
+        placeholder="输入关键字筛选，如 deepseek 或 sonnet"
+        onChange={(event) => {
+          setQuery(event.target.value)
+          setHighlight(0)
+        }}
+        onKeyDown={onKeyDown}
+      />
+      <div className="shadyRelayComboList" role="listbox" aria-label="目标模型">
+        {items.length === 0
+          && <div className="shadyRelayComboEmpty">没有匹配{needle ? `「${query.trim()}」` : ''}的模型</div>}
+        {items.map((item, at) => {
+          const selected = item.id === value
+          return <div
+            key={item.id}
+            ref={at === highlight ? highlightedRef : undefined}
+            role="option"
+            aria-selected={selected}
+            className={[
+              'shadyRelayComboOption',
+              item.missing ? 'shadyRelayComboOptionMissing' : '',
+              selected ? 'shadyRelayComboOptionSelected' : '',
+              at === highlight ? 'shadyRelayComboOptionActive' : '',
+            ].filter(Boolean).join(' ')}
+            onClick={() => pick(item.id)}
+          >
+            {selected ? '✓ ' : ''}{item.label}
+          </div>
+        })}
+      </div>
+      <div className="shadyRelayComboMeta">共 {options.length} 个模型，当前匹配 {matches.length} 个</div>
+    </div>}
+  </div>
+}
+
 function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: RemoteCatalogFace }) {
   const snapshot = React.useSyncExternalStore(
     (listener) => scope.subscribe(listener),
@@ -120,7 +267,6 @@ function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: Remot
   const [message, setMessage] = React.useState<{ kind: 'error' | 'success'; text: string } | null>(null)
   const [catalog, setCatalog] = React.useState<RemoteProviderGroup[]>([])
   const [catalogError, setCatalogError] = React.useState<string | null>(null)
-  const listId = React.useId().replace(/:/g, '')
 
   React.useEffect(() => {
     if (snapshot.status === 'ready' && !dirty) setDrafts(toDrafts(snapshot.value?.models))
@@ -144,6 +290,20 @@ function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: Remot
 
   const edit = (index: number, field: keyof DraftModel, value: string) => {
     setDrafts((current) => current.map((draft, at) => at === index ? { ...draft, [field]: value } : draft))
+    setDirty(true)
+    setMessage(null)
+  }
+
+  // Providers and models are dropdown-only: when the route changes, a model the
+  // new provider does not serve is dropped instead of lingering as a combo the
+  // user can no longer express through the selects.
+  const changeProvider = (index: number, providerId: string) => {
+    setDrafts((current) => current.map((draft, at) => {
+      if (at !== index) return draft
+      const served = catalog.find((group) => group.id === providerId)?.models ?? []
+      const targetModel = served.some((model) => model.id === draft.targetModel) ? draft.targetModel : ''
+      return { ...draft, targetProvider: providerId, targetModel }
+    }))
     setDirty(true)
     setMessage(null)
   }
@@ -198,7 +358,7 @@ function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: Remot
 
   if (snapshot.status === 'loading') return <div className="shadyRelayPage">正在加载虚拟模型设置…</div>
   if (snapshot.status === 'unavailable') {
-    return <div className="shadyRelayPage"><div className="shadyRelayStatus shadyRelayStatusError">当前 Host 未向 GUI 暴露 shady-relay 设置。</div></div>
+    return <div className="shadyRelayPage"><div className="shadyRelayStatus shadyRelayStatusError">{snapshot.error ?? '当前 Host 未向 GUI 暴露 shady-relay 设置。'}</div></div>
   }
 
   const disabled = saving || !snapshot.writable
@@ -218,16 +378,13 @@ function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: Remot
       </div>
     </div>
 
-    <datalist id={`${listId}-providers`}>
-      {catalog.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
-    </datalist>
-    {catalogError && <div className="shadyRelayStatus shadyRelayStatusError">读取模型目录失败：{catalogError}；仍可手工输入路由。</div>}
+    {catalogError && <div className="shadyRelayStatus shadyRelayStatusError">读取模型目录失败：{catalogError}；暂时无法选择目标 Provider 和模型，请稍后重试。</div>}
 
     {drafts.length === 0
       ? <div className="shadyRelayEmpty">还没有模型映射。点击“添加映射”开始配置。</div>
       : drafts.map((draft, index) => {
         const models = catalog.find((group) => group.id === draft.targetProvider)?.models ?? []
-        const modelListId = `${listId}-models-${index}`
+        const providerKnown = catalog.some((group) => group.id === draft.targetProvider)
         return <div className="shadyRelayCard" key={index}>
           <div className="shadyRelayCardHeader">
             <div className="shadyRelayCardTitle">{draft.name.trim() || draft.id.trim() || `映射 ${index + 1}`}</div>
@@ -248,12 +405,24 @@ function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: Remot
             </label>
             <label className="shadyRelayField">
               <span className="shadyRelayLabel">目标 Provider *</span>
-              <input className="shadyRelayInput" list={`${listId}-providers`} value={draft.targetProvider} disabled={disabled} placeholder="deepseek-official" onChange={(event) => edit(index, 'targetProvider', event.target.value)} />
+              <select className="shadyRelayInput" value={draft.targetProvider} disabled={disabled} onChange={(event) => changeProvider(index, event.target.value)}>
+                <option value="">选择 Provider…</option>
+                {!providerKnown && draft.targetProvider
+                  && <option value={draft.targetProvider}>{draft.targetProvider}（不在目录中）</option>}
+                {catalog.map((group) => (
+                  <option key={group.id} value={group.id}>{group.name === group.id ? group.id : `${group.name}（${group.id}）`}</option>
+                ))}
+              </select>
             </label>
             <label className="shadyRelayField">
               <span className="shadyRelayLabel">目标模型 *</span>
-              <input className="shadyRelayInput" list={modelListId} value={draft.targetModel} disabled={disabled} placeholder="deepseek-v4-flash" onChange={(event) => edit(index, 'targetModel', event.target.value)} />
-              <datalist id={modelListId}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
+              <FilterableModelSelect
+                value={draft.targetModel}
+                options={models}
+                disabled={disabled || !draft.targetProvider}
+                placeholder={draft.targetProvider ? '选择模型…' : '请先选择 Provider'}
+                onSelect={(id) => edit(index, 'targetModel', id)}
+              />
             </label>
             <label className="shadyRelayField shadyRelayFieldWide">
               <span className="shadyRelayLabel">描述</span>
@@ -281,7 +450,7 @@ function RelaySettingsPage({ scope, remote }: { scope: RelayScope; remote: Remot
 }
 
 export function apply(ctx: Context): void {
-  const scope = ctx.settingsScope.bind<Config>({ namespace: SETTINGS_NAMESPACE })
+  const scope = createRelayForm(ctx.configForms)
   const remote = ctx.remote as unknown as RemoteCatalogFace
 
   ctx.effect(() => {
